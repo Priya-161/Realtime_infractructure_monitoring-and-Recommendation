@@ -1,0 +1,113 @@
+https://code.earthengine.google.com/c50d6e6eb6927b50cb46019a56bc4dec
+
+//Gomti Nagar, Lucknow, 226010, Uttar Pradesh, India lat--26.8524588 long---81.0202533
+// Create a panel to hold our widgets.
+var panel = ui.Panel({
+  style: { width: '300px' }
+});
+
+// Add a title and some explanatory text.
+panel.add(ui.Label(
+  value: 'Land Cover Classification',
+  style: { fontSize: '20px', fontWeight: 'bold' }
+}));
+panel.add(ui.Label('Enter coordinates (latitude, longitude) to classify land cover.'));
+
+// Create text boxes for latitude and longitude input.
+var latInput = ui.Textbox('Latitude', '18.550228910375182');
+var lonInput = ui.Textbox('Longitude', '73.89069888727158');
+
+// Add the text boxes to the panel.
+panel.add(latInput);
+panel.add(lonInput);
+
+// Create a button to update the map based on the input coordinates.
+var button = ui.Button({
+  label: 'Run Classification',
+  onClick: function() {
+    var lat = parseFloat(latInput.getValue());
+    var lon = parseFloat(lonInput.getValue());
+
+    // Check if the inputs are valid numbers.
+    if (isNaN(lat) || isNaN(lon)) {
+      ui.Alert('Please enter valid numerical coordinates.');
+      return;
+    }
+
+    // Define a region of interest as a point.
+    var roi = ee.Geometry.Point(lon, lat);
+
+    // Load Landsat 8 input imagery.
+    var landsat = ee.Image(ee.ImageCollection('LANDSAT/LC08/C02/T1')
+      .filterDate('2020-01-01', '2020-12-31')
+      .filterBounds(roi)
+      .sort('CLOUD_COVER')
+      .first());
+
+    // Compute cloud score.
+    var cloudScore = ee.Algorithms.Landsat.simpleCloudScore(landsat).select('cloud');
+
+    // Mask the input for clouds.
+    var input = landsat.updateMask(landsat.mask().reduce('min').and(cloudScore.lte(50)));
+
+    // Use MODIS land cover, IGBP classification, for training.
+    var modis = ee.Image('MODIS/051/MCD12Q1/2011_01_01').select('Land_Cover_Type_1');
+
+    // Sample the input imagery to get a FeatureCollection of training data.
+    var training = input.addBands(modis).sample({
+      numPixels: 15000,
+      seed: 0
+    });
+
+    // Make a Random Forest classifier and train it.
+    var classifier = ee.Classifier.smileRandomForest(20)
+      .train({
+        features: training,
+        classProperty: 'Land_Cover_Type_1',
+        inputProperties: ['B1', 'B2', 'B3', 'B4', 'B5', 'B6', 'B7']
+      });
+
+    // Classify the input imagery.
+    var classified = input.classify(classifier);
+
+    // Get a confusion matrix representing resubstitution accuracy.
+    var trainAccuracy = classifier.confusionMatrix();
+    print('Resubstitution error matrix: ', trainAccuracy);
+    print('Training overall accuracy: ', trainAccuracy.accuracy());
+
+    // Sample the input with a different random seed to get validation data.
+    var validation = input.addBands(modis).sample({
+      numPixels: 5000,
+      seed: 1
+    }).filter(ee.Filter.neq('B1', null));
+
+    // Classify the validation data.
+    var validated = validation.classify(classifier);
+
+    // Get a confusion matrix representing expected accuracy.
+    var testAccuracy = validated.errorMatrix('Land_Cover_Type_1', 'classification');
+    print('Validation error matrix: ', testAccuracy);
+    print('Validation overall accuracy: ', testAccuracy.accuracy());
+
+    // Define a palette for the IGBP classification.
+    var igbpPalette = [
+      'aec3d4', '152106', '225129', '369b47', '30eb5b', '387242',
+      '6a2325', 'c3aa69', 'b76031', 'd9903d', '91af40', '111149',
+      'cdb33b', 'cc0013', '33280d', 'd7cdcc', 'f7e084', '6f6f6f'
+    ];
+
+    // Display the input and the classification.
+    Map.centerObject(roi, 10);
+    Map.layers().set(0, ui.Map.Layer(input, {bands: ['B3', 'B2', 'B1'], max: 0.4}, 'landsat'));
+    Map.layers().set(1, ui.Map.Layer(classified, {palette: igbpPalette, min: 0, max: 17}, 'classification'));
+  }
+});
+
+// Add the button to the panel.
+panel.add(button);
+
+// Add the panel to the ui.root.
+ui.root.insert(0, panel);
+
+// Set the initial map view.
+Map.setCenter(73.89069888727158, 18.550228910375182, 10);
